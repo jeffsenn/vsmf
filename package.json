@@ -4,7 +4,8 @@
   "description": "Visage Standard Message Format javascript/JSON API",
   "main": "vsmf.js",
   "scripts": {
-    "test": "node test.js"
+     "test": "node test.js",
+     "publish:npm": "npm publish"
   },
   "keywords": [
     "VSMF",
