@@ -1,16 +1,47 @@
 const Immutable = require('immutable');
 
 module.exports = function() {
+    function hexToUint8Array(hex) {
+        if (hex.length % 2 !== 0) {
+            throw new Error("Invalid hex string length");
+        }
+        
+        const array = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < hex.length; i += 2) {
+            array[i / 2] = parseInt(hex.substr(i, 2), 16);
+        }
+        return array;
+    }
+    function uint8ArrayToHex(uint8) {
+    return Array.from(uint8)
+                    .map(b => b.toString(16).padStart(2, "0"))
+                    .join("");
+    }
     function b64Tou8(base64) {
-        const buffer = Buffer.from(base64, 'base64');
+    const buffer = Buffer.from(base64, 'base64');
         return new Uint8Array(buffer);
     }
     function u8ToB64(uint8Array) {
         return Buffer.from(uint8Array).toString('base64');
     }
     function unpackFloat(view, length, lsb) {
+        if(view[1] + length > view[2]) throw(new Error("short buffer"));
         if(length != 4 && length != 8) throw(new Error("bad float"));
-        return (length == 4) ? view[0].getFloat32(view[1],lsb) ? view[0].getFloat64(view[1],lsb);
+        ret = (length == 4) ? view[0].getFloat32(view[1],lsb) : view[0].getFloat64(view[1],lsb);
+        view[1] += length;
+        return ret;
+    }
+    function unpackInt(view, length, lsb) {
+        if(view[1] + length > view[2]) throw(new Error("short buffer"));
+        const off = view[1];
+        view[1] += length;
+        switch(length) {
+            case 1: return view[0].getUint8(off,lsb);
+            case 2: return view[0].getUint16(off,lsb);
+            case 4: return view[0].getUint32(off,lsb);
+            case 8: return view[0].getUint64(off,lsb);
+        }
+        throw(Error("bad int pack len"));
     }
     const TCID_STRUCT = 0;
     const TCID_HOMO_ARR = 1;
@@ -33,18 +64,20 @@ module.exports = function() {
     const TCID_MSB_CHAR = 13;
     const TCID_PAD = 14;
     const TCID_BIN = 15;
-    const TCID_MIME = 16 #deprecated;
+    const TCID_MIME = 16; //deprecated
     const TCID_TERMINAL = 17;
     const TCID_QUANTITY = 18;
     const TCID_ERRTOK = 19;
     const TCID_MIME2 = 20;
     const TCID_FRAGMENT = 21;
+    const TCID_ISO8601 = 100;
     
     const textDecoder = new TextDecoder("utf-8");
     const textEncoder = new TextEncoder("utf-8");    
     const stringTC = [[0,-1,TCID_STRING]];
     const binTC = [[0,-1,TCID_BIN]];
-    const CUPACK = {1: getUint8, 2: getUint16, 4: getUint32, 8: getUint64}
+
+    const ERRTOK = Immutable.fromJS({"":["ERROR"]})    
     
     function bytesForFloat(n) {
         if (!Number.isFinite(n)) return 4; // NaN, Infinity fit in Float32
@@ -62,8 +95,8 @@ module.exports = function() {
             this.offset = 0;
         }
         ensure(size) {
-            if (this.offset + size <= this.buffer.length) return;
-            let newSize = this.buffer.length;
+            if (this.offset + size <= this.buffer.byteLength) return;
+            let newSize = this.buffer.byteLength;
             while (this.offset + size > newSize) {
                 newSize *= 2;
             }
@@ -72,7 +105,7 @@ module.exports = function() {
             this.buffer = newBuf;
             this.view = new DataView(this.buffer.buffer);
         }
-        putInt(val, n, lsb = False) {
+        putInt(val, n, lsb = false) {
             this.ensure(n);
             if(lsb) {
                 while(n--) {
@@ -80,30 +113,39 @@ module.exports = function() {
                     val >>=8;
                 }
             } else {
-                for(const i= this.offset + n; i > this.offset; i--) {
+                for(let i= this.offset + n; i > this.offset; i--) {
                     this.view.setUint8(i-1, val&0xff);
                     val >>= 8;
                 }
                 this.offset += n;
             }
         }
+        putFloat(val, n, lsb = false) {
+            this.ensure(n);
+            switch(n) {
+                case 4: this.view.setFloat32(this.offset, val); break;
+                case 8: this.view.setFloat64(this.offset, val); break;
+                default: throw Error("bad float len");
+            }
+            this.offset += n;
+        }
         putEint(val) { //warning: only works w/ 32bits
             if(val < 0) throw(new Error("negative eint"));
             if(val < 0xfc) {
-                putInt(val,1);
+                this.putInt(val,1);
             }  else if(val <= 0x0ffff) {
-                putInt(0xfc,1); putInt(val,2);
+                this.putInt(0xfc,1); this.putInt(val,2);
             } else {
-                putInt(0xfd,1); putInt(val,4);
+                this.putInt(0xfd,1); this.putInt(val,4);
             }            
         }
         putBytes(bytes) {
-            this.ensure(bytes.length);
+            this.ensure(bytes.byteLength);
             this.buffer.set(bytes, this.offset);
-            this.offset += bytes.length;
+            this.offset += bytes.byteLength;
         }
         toArrayBuffer() {
-            return this.buffer.buffer.slice(0, this.offset); // trim
+            return this.buffer.slice(0, this.offset); // trim
         }
     }    
     
@@ -124,13 +166,132 @@ module.exports = function() {
     function asString(a) {
         return (typeof(a) == "string") ? a : (""+a);
     }
+    function serialize(a)  {
+        const buf = new ByteWriter();
+        switch (typeof(a)) {
+            case "boolean":
+                buf.putInt(0x2a);
+                buf.putInt(a ? 1 : 0);
+                break;                    
+            case "number":
+            case "bigint":
+                if((typeof a === "bigint") || (typeof a === "number" && Number.isInteger(a))) { //int
+                    if(a >= -32768 && a < 32767) {
+                        buf.putInt(0x49, 1);
+                        buf.putInt(a, 2);
+                    } else if(a >= -2147483648 && a <= 2147483647) {
+                        buf.putInt(0x69, 1);                            
+                        buf.putInt(a, 4);
+                    } else {
+                        throw(new Error("Not impl todo: int too big"));
+                    }
+                } else { //float
+                    const lf = bytesForFloat(a);
+                    buf.putInt(lf === 4 ? 0x6b : 0x8b, 1);
+                    buf.putFloat(a, lf);
+                }
+                break;
+            case "string":
+                const bytes = textEncoder.encode(a);
+                buf.putInt(0xA5,1);
+                buf.putEint(bytes.byteLength);
+                buf.putBytes(bytes);
+                break;
+            case "object":
+                if(a === null) {
+                    buf.putInt(0x08,1);
+                } else if(Immutable.List.isList(a) || Array.isArray(a)) {
+                    buf.putInt(0xa2, 1);
+                    if(a.length > 0) {
+                        const lbuf = new ByteWriter();
+                        a.forEach((item, i) => {
+                            const v = serialize(item);
+                            //lbuf.putEint(v.byteLength);
+                            lbuf.putBytes(v)
+                        });
+                        buf.putEint(lbuf.offset);
+                        buf.putBytes(lbuf.toArrayBuffer());
+                    } else {
+                        buf.putEint(0);
+                    }
+                } else {
+                    function serializeUUID(buf, uus) {
+                        const bytes = (uus.slice(0,1) == '~') ? hexToUint8Array(uus.slice(1)) : textEncoder.encode(uus);
+                        buf.putEint(bytes.byteLength);
+                        buf.putBytes(bytes);
+                    }
+                    function serializeEform(buf, ef) {
+                        Object.keys(ef).forEach(key => { //todo: should this be sorted?
+                            if(ef.hasOwnProperty(key)) {
+                                const bytes = textEncoder.encode(key);
+                                buf.putEint(bytes.byteLength);
+                                buf.putBytes(bytes);
+                                const vbytes = serialize(ef[key]);
+                                buf.putEint(vbytes.byteLength);
+                                buf.putBytes(vbytes);
+                            }
+                        })
+                    }
+                    const spc = isSpecial(a);
+                    switch(spc) {
+                        case "ERROR":
+                            buf.putInt(0x13,1);
+                            break;
+                        case "UUID":
+                            buf.putInt(0xA3,1);
+                            serializeUUID(buf, a[''][1]);
+                            break;
+                        case "UFORM": {
+                            const lbuf = new ByteWriter();
+                            serializeUUID(lbuf, a[''][1]);
+                            serializeEform(lbuf, a[''][2]);
+                            buf.putInt(0xa4,1);
+                            buf.putEint(lbuf.offset);
+                            buf.putBytes(lbuf.toArrayBuffer());
+                        } break;
+                        case "BINARY": {
+                            const bytes = b64Tou8(a[''][2])
+                            buf.putInt(0xaf,1);                                
+                            buf.putEint(bytes.byteLength);
+                            buf.putBytes(bytes);
+                        } break;
+                        case "MIME":
+                        case "MIME2":
+                        case "CHAR":
+                        case "QUANTITY":
+                        case "DATE":
+                        case "MESSAGE":
+                        case "STRUCT":
+                        case "HARRAY":
+                            todo();
+                        default: {
+                            //I guess attempt eform encode
+                            const lbuf = new ByteWriter();
+                            serializeEform(lbuf, a);
+                            buf.putInt(0xa6,1);
+                            buf.putEint(lbuf.offset);
+                            buf.putBytes(lbuf.toArrayBuffer());
+                        }
+                    }
+                }
+                break;
+            case "undefined":
+            case "symbol":
+            case "function":
+            default: 
+                throw(new Error("Not serializable: " + typeof a));
+        }
+        return buf.toArrayBuffer();
+    }
     var vsmf = {
+        NULL: null,
+        ERRTOK: ERRTOK,
         isUForm: function(a) {
             return isSpecial(a) === "UFORM";
-        }
+        },
         isEForm: function(a) {
             return Immutable.Map.isMap(a) && !isSpecial(a);
-        }
+        },
         isList: function(a) {
             return Immutable.List.isList(a) || Array.isArray(a);
         },
@@ -159,116 +320,7 @@ module.exports = function() {
         Immutable: Immutable,
         
         // binary format functions
-        serialize: function(a)  {
-            //using buffer this way is not most efficient
-            const buf = new ByteWriter();
-            switch (typeof(a)) {
-                case "boolean":
-                    buf.putInt(0x2a);
-                    buf.putInt(a ? 1 : 0);
-                    break;                    
-                case "number":
-                case "bigint":
-                    if((typeof a === "bigint") || (typeof a === "number" && Number.isInteger(a))) { //int
-                        if(a >= -32768 && a < 32767) {
-                            buf.putInt(0x49, 1);
-                            buf.putInt(a, 2);
-                        } else if(a >= -2147483648 && a <= 2147483647) {
-                            buf.putInt(0x69, 1);                            
-                            buf.putInt(a, 4);
-                        } else {
-                            throw(new Error("Not impl todo: int too big"));
-                        }
-                    } else { //float
-                        const lf = bytesForFloat(a);
-                        buf.putInt(lf === 4 ? 0x6b : 0x8b, 1);
-                        buf.putFloat(a, lf);
-                    }
-                    break;
-                case "string":
-                    const bytes = textEncoder.encode(str);
-                    buf.putInt(bytes.0xA5,1);
-                    buf.putEint(bytes.length);
-                    buf.putBytes(bytes);
-                    break;
-                case "object":
-                    if(a === null) {
-                        buf.putInt(bytes.0x08,1);
-                    } else if(isList(a)) {
-                        const lbuf = new ByteWriter();
-                        a.forEach((item, i) => lbuf.putBytes(serialize(item)));
-                        buf.putInt(0xa2, 1);
-                        buf.putEint(lbuf.offset);
-                        buf.putBytes(lbuf.toArrayBuffer());
-                    } else {
-                        function serializeUUID(buf, uus) {
-                            const bytes = (uus.slice(0,1) == '~') ? unhex(uus.slice(1)) : textEncoder.encode(uus);
-                            buf.putEint(bytes.length);
-                            buf.putBytes(bytes);
-                        }
-                        function serializeEform(buf, ef) {
-                            Object.keys(obj).forEach(key => { //todo: should this be sorted?
-                                if(ef.hasOwn(key)) {
-                                    const bytes = textEncoder.encode(key);
-                                    buf.putEint(bytes.length);
-                                    buf.putBytes(bytes);
-                                    const vbytes = serialize(ef[key]);
-                                    buf.putEint(vbytes.length);
-                                    buf.putBytes(vbytes);
-                                }
-                            })
-                        }
-                        const spc = isSpecial(a);
-                        switch(spc) {
-                            case "ERROR":
-                                buf.putInt(bytes.0x13,1);
-                                break;
-                            case "UUID":
-                                buf.putInt(bytes.0xA3,1);
-                                serializeUUID(buf, a[''][1]);
-                                break;
-                            case "UFORM": {
-                                const lbuf = new ByteWriter();
-                                serializeUUID(lbuf, a[''][1]);
-                                serializeEform(lbuf, a[''][2]);
-                                buf.putInt(bytes.0xa4,1);
-                                buf.putEint(lbuf.offset);
-                                buf.putBytes(lbuf.toArrayBuffer());
-                            } break;
-                            case "BINARY": {
-                                const bytes = b64Tou8(a[''][2])
-                                buf.putInt(bytes.0xaf,1);                                
-                                buf.putEint(bytes.length);
-                                buf.putBytes(bytes);
-                            } break;
-                            case "MIME":
-                            case "MIME2":
-                            case "CHAR":
-                            case "QUANTITY":
-                            case "DATE":
-                            case "MESSAGE":
-                            case "STRUCT":
-                            case "HARRAY":
-                                todo();
-                            default: {
-                                //I guess attempt eform encode
-                                const lbuf = new ByteWriter();
-                                serializeEform(lbuf, a);
-                                buf.putInt(bytes.0xa6,1);
-                                buf.putEint(lbuf.offset);
-                                buf.putBytes(lbuf.toArrayBuffer());
-                            }
-                        }
-                    }
-                    break;
-                case "undefined":
-                case "symbol":
-                case "function":
-                default: 
-                    throw(new Error("Not serializable"));
-            }
-            return new Uint8Array(buf).buffer;
-        },
+        serialize: serialize,
         deserialize: function(buffer) {
             function getEint(view) {
                 const b = getByte(view);
@@ -281,71 +333,84 @@ module.exports = function() {
             }
             function getBytes(view, n) {
                 if(view[1] + n > view[2]) throw(new Error("short buffer"));
-                return new Uint8Array(view[0], view[1], n);
+                const ret = new Uint8Array(view[0].buffer, view[1], n);
+                view[1] += n
+                return ret;
             }
-            function getBytesInt(view, n) {
+            function getBytesInt(view, n) { //arbitrary len but not fast
                 if(view[1] + n > view[2]) throw(new Error("short buffer"));
                 let ret = 0;
                 while(n--) ret = (ret<<8) + getByte(view);
                 return ret;
             }
             function parse(view) {
-                return parseType(parseTypeCode(view),view);
+                const ret = parseType(parseTC(view),view);
+                return ret;
             }
             function parseType(tc, view) {
-                const kind,tclength,id = tc[0];
+                const [kind,tclength,id] = tc[0];
                 const length = tclength == -1 ? getEint(view) : tclength;
                 if(view[1] + length > view[2]) throw(new Error("short buffer"));                
                 if(kind === 0) {
                     //todo deal with ID not simple 1
                     switch (id) {
-                        case TCID_HET_ARR:
+                        case TCID_HET_ARR: {
                             const result = [];
                             const subview = [view[0],view[1],view[1]+length];
                             while(subview[1] < subview[2]) {
-                                result.append(parse(subview));
+                                result.push(parse(subview));
                             }
+                            view[1] += length;
                             return Immutable.List(result);
-                        case TCID_UUID:
-                            return Immutable.fromJS({"":["UUID", uuidString(getBytes(view, length))]});
+                        }
+                        case TCID_UUID: {
+                            const bytes = getBytes(view, length);
+                            const uus = (bytes[0] > 31 && bytes[0] < 126) ? textDecoder.decode(bytes) : "~"+uint8ArrayToHex(bytes);
+                            return Immutable.fromJS({"":["UUID", uus]});
+                        }
                         case TCID_STRING:
                             return textDecoder.decode(getBytes(view, length));
-                        case TCID_EFORM:
+                        case TCID_EFORM: {
                             const subview = [view[0],view[1],view[1]+length];
-                            cosnt ef = {};
+                            const ef = {};
                             while(subview[1] < subview[2]) {
                                 const alen = getEint(subview);
                                 const attr = textDecoder.decode(getBytes(subview, alen));
                                 const valLen = getEint(subview);
                                 ef[attr] = parse([subview[0],subview[1],subview[1] + valLen]);
                             }
+                            view[1] += length;
                             return Immutable.fromJS(ef);
-                        case TCID_UFORM:
+                        }
+                        case TCID_UFORM: {
                             const subview = [view[0],view[1],view[1]+length];
-                            const uubytes = getBytes(getEint(subview));
-                            cosnt ufd = {};
+                            const e = getEint(subview);
+                            const uubytes = getBytes(subview, e);
+                            const uus = (uubytes[0] > 31 && uubytes[0] < 126) ? textDecoder.decode(uubytes) : "~"+uint8ArrayToHex(uubytes);
+                            const ufd = {};
                             while(subview[1] < subview[2]) {
                                 const alen = getEint(subview);
                                 const attr = textDecoder.decode(getBytes(subview, alen));
                                 const valLen = getEint(subview);
                                 ufd[attr] = parse([subview[0],subview[1],subview[1] + valLen]);
+                                subview[1] += valLen;
                             }
-                            return Immutable.fromJS({"":["UFORM", uuid, Immutable.fromJS(ufd)]});
+                            view[1] += length;
+                            return Immutable.fromJS({"":["UFORM", uus, Immutable.fromJS(ufd)]});
+                        }
                         case TCID_QUANTITY:
                             return Immutable.fromJS({"":["QUANTITY", getBytes(view, length)]});
                         case TCID_ISO8601:
                             return Immutable.fromJS({"":["DATE", textDecoder.decode(getBytes(view))]});
                         case TCID_MESSAGE:
                             return Immutable.fromJS({"":["MESSAGE", getBytes(view, length)]});
-                        case TCID_NULL:
-                            return NULL;
                         case TCID_ERRTOK:
                             return ERRTOK;
                         case TCID_MSB_INT:
                             if(length == 0) return true; //legacy
-                            return getBytesInt(view,length);
-                        case TCID_LSB_INT:
-                            return getBytesInt(view,length, true);
+                            return unpackInt(view,length, false);
+                        case TCID_LSB_INT: //same: TCID_NULL:
+                            return (length == 0) ? null : unpackInt(view,length, true);
                         case TCID_LSB_FLOAT:
                             if(length < 2) return length == 0 ? false : (getByte(view) != 0);
                             return unpackFloat(view, length, true);
@@ -363,14 +428,14 @@ module.exports = function() {
                                                       textDecoder.decode(getBytes(view, getEint(view))),
                                                       u8ToB64(getBytes(view, getEint(view)))]});
                         case TCID_ASCII:
-                        case TCID_LSB_CHAR:
-                            const val = CUPACK[length](view[0], true);
-                            view[1] += length;
+                        case TCID_LSB_CHAR: {
+                            const val = unpackInt(view, length, true);
                             return Immutable.fromJS({"":["CHAR", val]});
-                        case TCID_MSB_CHAR:
-                            const val = CUPACK[length](view[0], false);
-                            view[1] += length;
+                        }
+                        case TCID_MSB_CHAR: {
+                            const val = unpackInt(view, length, false);
                             return Immutable.fromJS({"":["CHAR", val]});
+                        }
                         default:
                             return todo; //_var_or_fixed_tc(0xBF,len(cbuf), b'\x01\x81') + cbuf
                     }
@@ -378,7 +443,7 @@ module.exports = function() {
                     if(cid == TCID_STRUCT) {
                         const ret = [];
                         for(const i=0; i<tc.length; i++) {
-                            ret.append(parseType(tc[i], view));
+                            ret.push(parseType(tc[i], view));
                         }
                         return Immutable.fromJS({"":["STRUCT", ret]});
                     } else if(cid == TCID_HOMO_ARR) {
@@ -390,50 +455,52 @@ module.exports = function() {
                             throw(new Error("nyi"));
                         }
                         while(subview[1] < subview[2]) {
-                            ret.append(parseType(memType, subview));
+                            ret.push(parseType(memType, subview));
                         }
-                        return Immutable.fromJS("":["HARRAY", ret]); // not sure this is right
+                        view[1] += length;
+                        return Immutable.fromJS({"":["HARRAY", ret]}); // not sure this is right
+                    } else {
+                        return Immutable.fromJS({"":["VALUE", tc, u8ToB64(getBytes(view, length))]}); //todo?
                     }
-                } else {
-                    return Immutable.fromJS({"":["VALUE", tc, u8ToB64(getBytes(view, length))]}); //todo? 
                 }
             }
             function parseCodon(view) {
                 const b1 = getByte(view);
                 const abc = (b1 >> 5);
-                const defg = b1 & 0x1f;
+                const defgh = b1 & 0x1f;
                 if(abc === 6) {
                     const length = (defgh >> 4) === 0 ? -1 : getEint(view);
                     const kind = ((defgh >> 3) & 1) === 0 ? 1 : getEint(view);
-                    const cid = (defgh & 7) === 7 ? readBytesInt(view, getEint(view)) : (defgh & 7);
-                    return kind, length, cid;
+                    const cid = (defgh & 7) === 7 ? getBytesInt(view, getEint(view)) : (defgh & 7);
+                    return [kind, length, cid];
                 } else {
                     const length = abc === 7 ? getEint(view) : [0,1,2,4,8,-1][abc];
-                    const cid = defgh === 0x1f ? readBytesInt(view, getEint(view)) : defgh;
-                    return 0, length, cid;
+                    const cid = defgh === 0x1f ? getBytesInt(view, getEint(view)) : defgh;
+                    return [0, length, cid];
                 }
             }
             function parseTC(view) {
                 const tc = [parseCodon(view)];
                 for(j=0; j<tc[0][0]; j++) {
-                    tc.append(parseTC(view));
+                    tc.push(parseTC(view));
                 }
                 return tc;
             }
-            const realbuf = Array.isArray(buffer) ? buffer.buffer : buffer; //works on buffer or array
+            const realbuf = buffer instanceof Uint8Array ? buffer.buffer : buffer; //works on buffer or array
             const view = [new DataView(realbuf), 0, realbuf.byteLength];
             const ret = [];
             while(1) {
                 const tc = parseTC(view);
                 const before = view[1];
                 const val = parseType(tc, view)
-                ret.append(val);
+                ret.push(val);
                 if(view[1] >= view[2]) break;
                 if(view[1] <= before) throw(new Error("bad vsmf"));
             }
             if(ret.length === 1) return ret[0];
-            return Immutable.List(ret);
+            return Immutable.List(ret); //vsmf implicit list assumption
         }
+    }
     return vsmf;
 }();
 
