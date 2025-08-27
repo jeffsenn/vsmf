@@ -1,6 +1,10 @@
 const Immutable = require('immutable');
 
 module.exports = function() {
+    function immute(a, doit=true, frez=false) {
+        if(frez && typeof(a) === "object") Object.freeze();
+        return doit ? Immutable.fromJS(a) : a;
+    }
     function hexToUint8Array(hex) {
         if (hex.length % 2 !== 0) {
             throw new Error("Invalid hex string length");
@@ -77,7 +81,8 @@ module.exports = function() {
     const stringTC = [[0,-1,TCID_STRING]];
     const binTC = [[0,-1,TCID_BIN]];
 
-    const ERRTOK = Immutable.fromJS({"":["ERROR"]})    
+    const ERRTOK = {"":["ERROR"]};
+    Object.freeze(ERRTOK);
     
     function bytesForFloat(n) {
         if (!Number.isFinite(n)) return 4; // NaN, Infinity fit in Float32
@@ -148,7 +153,7 @@ module.exports = function() {
             return this.buffer.slice(0, this.offset); // trim
         }
     }    
-    
+    function getI(a, v, i) { return a.getIn ? a.getIn([v,i]) : a[v][i]; }
     function get(a) {
         //this is not very efficient
         return Immutable.Map.isMap(a) ? a.getIn(Array.prototype.slice.call(arguments,1)) :
@@ -200,9 +205,9 @@ module.exports = function() {
             case "object":
                 if(a === null) {
                     buf.putInt(0x08,1);
-                } else if(Immutable.List.isList(a) || Array.isArray(a)) {
+                } else if(a instanceof Immutable.List || Array.isArray(a)) {
                     buf.putInt(0xa2, 1);
-                    if(a.length > 0) {
+                    if((a instanceof Immutable.List ? a.size : a.length) > 0) {
                         const lbuf = new ByteWriter();
                         a.forEach((item, i) => {
                             const v = serialize(item);
@@ -221,16 +226,16 @@ module.exports = function() {
                         buf.putBytes(bytes);
                     }
                     function serializeEform(buf, ef) {
-                        Object.keys(ef).forEach(key => { //todo: should this be sorted?
-                            if(ef.hasOwnProperty(key)) {
-                                const bytes = textEncoder.encode(key);
-                                buf.putEint(bytes.byteLength);
-                                buf.putBytes(bytes);
-                                const vbytes = serialize(ef[key]);
-                                buf.putEint(vbytes.byteLength);
-                                buf.putBytes(vbytes);
-                            }
-                        })
+                        (ef instanceof Immutable.Map ? Array.from(ef.entries()) :
+                         Object.entries(ef)).forEach(kv => { //todo: should this be sorted?
+                            const [key,val] = kv;
+                            const bytes = textEncoder.encode(key);
+                            buf.putEint(bytes.byteLength);
+                            buf.putBytes(bytes);
+                            const vbytes = serialize(val);
+                            buf.putEint(vbytes.byteLength);
+                            buf.putBytes(vbytes);
+                        });
                     }
                     const spc = isSpecial(a);
                     switch(spc) {
@@ -239,18 +244,18 @@ module.exports = function() {
                             break;
                         case "UUID":
                             buf.putInt(0xA3,1);
-                            serializeUUID(buf, a[''][1]);
+                            serializeUUID(buf, getI(a,'',1));
                             break;
                         case "UFORM": {
                             const lbuf = new ByteWriter();
-                            serializeUUID(lbuf, a[''][1]);
-                            serializeEform(lbuf, a[''][2]);
+                            serializeUUID(lbuf, getI(a,'',1));
+                            serializeEform(lbuf, getI(a,'',2));
                             buf.putInt(0xa4,1);
                             buf.putEint(lbuf.offset);
                             buf.putBytes(lbuf.toArrayBuffer());
                         } break;
                         case "BINARY": {
-                            const bytes = b64Tou8(a[''][2])
+                            const bytes = b64Tou8(getI(a,'',2))
                             buf.putInt(0xaf,1);                                
                             buf.putEint(bytes.byteLength);
                             buf.putBytes(bytes);
@@ -321,7 +326,7 @@ module.exports = function() {
         
         // binary format functions
         serialize: serialize,
-        deserialize: function(buffer) {
+        deserialize: function(buffer, useImmutable = false, useFreeze = false) {
             function getEint(view) {
                 const b = getByte(view);
                 if(b < 0xfc) return b;
@@ -361,12 +366,13 @@ module.exports = function() {
                                 result.push(parse(subview));
                             }
                             view[1] += length;
-                            return Immutable.List(result);
+                            return immute(result, useImmutable, useFreeze);
                         }
                         case TCID_UUID: {
                             const bytes = getBytes(view, length);
                             const uus = (bytes[0] > 31 && bytes[0] < 126) ? textDecoder.decode(bytes) : "~"+uint8ArrayToHex(bytes);
-                            return Immutable.fromJS({"":["UUID", uus]});
+                            const ret = {"":["UUID", uus]};
+                            return immute(ret, useImmutable, useFreeze);
                         }
                         case TCID_STRING:
                             return textDecoder.decode(getBytes(view, length));
@@ -380,7 +386,7 @@ module.exports = function() {
                                 ef[attr] = parse([subview[0],subview[1],subview[1] + valLen]);
                             }
                             view[1] += length;
-                            return Immutable.fromJS(ef);
+                            return immute(ef, useImmutable, useFreeze);
                         }
                         case TCID_UFORM: {
                             const subview = [view[0],view[1],view[1]+length];
@@ -396,14 +402,15 @@ module.exports = function() {
                                 subview[1] += valLen;
                             }
                             view[1] += length;
-                            return Immutable.fromJS({"":["UFORM", uus, Immutable.fromJS(ufd)]});
+                            const ret= {"":["UFORM", uus, ufd]};
+                            return immute(ret, useImmutable, useFreeze);
                         }
                         case TCID_QUANTITY:
-                            return Immutable.fromJS({"":["QUANTITY", getBytes(view, length)]});
+                            return immute({"":["QUANTITY", getBytes(view, length)]}, useImmutable, useFreeze);
                         case TCID_ISO8601:
-                            return Immutable.fromJS({"":["DATE", textDecoder.decode(getBytes(view))]});
+                            return immute({"":["DATE", textDecoder.decode(getBytes(view))]}, useImmutable, useFreeze);
                         case TCID_MESSAGE:
-                            return Immutable.fromJS({"":["MESSAGE", getBytes(view, length)]});
+                            return immute({"":["MESSAGE", getBytes(view, length)]}, useImmutable, useFreeze);
                         case TCID_ERRTOK:
                             return ERRTOK;
                         case TCID_MSB_INT:
@@ -420,21 +427,21 @@ module.exports = function() {
                         case TCID_PAD:
                             return {"": ["PAD", u8ToB64(getBytes(view, length))]} //todo: should this decode?
                         case TCID_BIN:
-                            return Immutable.fromJS({"":["BINARY", u8ToB64(getBytes(view, length))]})
+                            return immute({"":["BINARY", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
                         case TCID_MIME:
-                            return Immutable.fromJS({"":["MIME", parseType(stringTC, view), parseType(binTC, view)]});
+                            return immute({"":["MIME", parseType(stringTC, view), parseType(binTC, view)]}, useImmutable, useFreeze);
                         case TCID_MIME2:
-                            return Immutable.fromJS({"":["MIME2", 
+                            return immute({"":["MIME2", 
                                                       textDecoder.decode(getBytes(view, getEint(view))),
-                                                      u8ToB64(getBytes(view, getEint(view)))]});
+                                                      u8ToB64(getBytes(view, getEint(view)))]}, useImmutable, useFreeze);
                         case TCID_ASCII:
                         case TCID_LSB_CHAR: {
                             const val = unpackInt(view, length, true);
-                            return Immutable.fromJS({"":["CHAR", val]});
+                            return immute({"":["CHAR", val]}, useImmutable, useFreeze);
                         }
                         case TCID_MSB_CHAR: {
                             const val = unpackInt(view, length, false);
-                            return Immutable.fromJS({"":["CHAR", val]});
+                            return immute({"":["CHAR", val]}, useImmutable, useFreeze);
                         }
                         default:
                             return todo; //_var_or_fixed_tc(0xBF,len(cbuf), b'\x01\x81') + cbuf
@@ -445,7 +452,7 @@ module.exports = function() {
                         for(const i=0; i<tc.length; i++) {
                             ret.push(parseType(tc[i], view));
                         }
-                        return Immutable.fromJS({"":["STRUCT", ret]});
+                        return immute({"":["STRUCT", ret]}, useImmutable, useFreeze);
                     } else if(cid == TCID_HOMO_ARR) {
                         const subview = [view[0],view[1],view[1]+length];                        
                         if(tc.length != 2) throw(new Error("unsupported hom array"));
@@ -458,9 +465,9 @@ module.exports = function() {
                             ret.push(parseType(memType, subview));
                         }
                         view[1] += length;
-                        return Immutable.fromJS({"":["HARRAY", ret]}); // not sure this is right
+                        return immute({"":["HARRAY", ret]}, useImmutable, useFreeze); // not sure this is right
                     } else {
-                        return Immutable.fromJS({"":["VALUE", tc, u8ToB64(getBytes(view, length))]}); //todo?
+                        return immute({"":["VALUE", tc, u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze); //todo?
                     }
                 }
             }
@@ -498,7 +505,7 @@ module.exports = function() {
                 if(view[1] <= before) throw(new Error("bad vsmf"));
             }
             if(ret.length === 1) return ret[0];
-            return Immutable.List(ret); //vsmf implicit list assumption
+            return immute(ret, useImmutable, useFreeze); //vsmf implicit list assumption
         }
     }
     return vsmf;
