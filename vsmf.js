@@ -1,4 +1,15 @@
-const Immutable = require('immutable');
+function require_optional(m) {
+    let ret = null;
+    try {
+        ret = require("immutable");
+    } catch (err) {
+        if (err.code != "MODULE_NOT_FOUND") {
+            throw err;
+        }
+    }
+    return ret;
+}
+const Immutable = require_optional('immutable');
 
 module.exports = function() {
     function immute(a, doit=true, frez=false) {
@@ -154,13 +165,14 @@ module.exports = function() {
         }
     }    
     function getI(a, v, i) { return a.getIn ? a.getIn([v,i]) : a[v][i]; }
-    function get(a) {
-        //this is not very efficient
-        return Immutable.Map.isMap(a) ? a.getIn(Array.prototype.slice.call(arguments,1)) :
-               undefined;
+    function get(a,defa) {
+        return getIn(a,Array.prototype.slice.call(arguments,1), defa);
     }
-    function getIn(a,b) {
-        return Immutable.Map.isMap(a) ? a.getIn(b) : undefined;
+    function getIn(a,b,defa) {
+        if(a.getIn) return a.getIn(b,defa);
+        return b.reduce((ac,k) => {
+            return (acc === undefined || acc === null) ? undefined : acc[key];
+        }, a) ?? defa;
     }
     function isSpecial(a) {
         if(a.getIn && a.size == 1) return a.getIn(["",0]);
@@ -205,9 +217,9 @@ module.exports = function() {
             case "object":
                 if(a === null) {
                     buf.putInt(0x08,1);
-                } else if(a instanceof Immutable.List || Array.isArray(a)) {
+                } else if((Immutable && a instanceof Immutable.List) || Array.isArray(a)) {
                     buf.putInt(0xa2, 1);
-                    if((a instanceof Immutable.List ? a.size : a.length) > 0) {
+                    if(((Immutable && a instanceof Immutable.List) ? a.size : a.length) > 0) {
                         const lbuf = new ByteWriter();
                         a.forEach((item, i) => {
                             const v = serialize(item);
@@ -226,7 +238,7 @@ module.exports = function() {
                         buf.putBytes(bytes);
                     }
                     function serializeEform(buf, ef) {
-                        (ef instanceof Immutable.Map ? Array.from(ef.entries()) :
+                        ((Immutable && ef instanceof Immutable.Map) ? Array.from(ef.entries()) :
                          Object.entries(ef)).sort().forEach(kv => {
                             const [key,val] = kv;
                             const bytes = textEncoder.encode(key);
@@ -308,13 +320,14 @@ module.exports = function() {
         return buf.toArrayBuffer();
     }
     var vsmf = {
+        require_optional: require_optional,
         NULL: null,
         ERRTOK: ERRTOK,
         isUForm: function(a) {
             return isSpecial(a)?.upper() === "UFORM";
         },
-        isEForm: function(a) {
-            return Immutable.Map.isMap(a) && !isSpecial(a);
+        isEForm: function(a) { //this is a little goofy
+            return !isSpecial(a) && ((Immutable && Immutable.Map.isMap(a))||(!Immutable && typeof a == "object")) ;
         },
         isList: function(a) {
             return Immutable.List.isList(a) || Array.isArray(a);
@@ -329,7 +342,9 @@ module.exports = function() {
             return (typeof(a) == "number");
         },
         toUUID: function(a) {
-            return Immutable.fromJS({"":["UUID",asString(a)]});
+            const ret = {"":["UUID",asString(a)]};
+            Object.freeze(ret);
+            return Immutable ? Immutable.fromJS(ret) : ret;
         },
         asUUIDString: function(a) {
             return (isSpecial(a) == "UUID") ? (a.getIn ? a.getIn(["",1]) : a[""][1]) : undefined;
@@ -345,7 +360,8 @@ module.exports = function() {
         
         // binary format functions
         serialize: serialize,
-        deserialize: function(buffer, useImmutable = false, useFreeze = false) {
+        deserialize: function(buffer, useImmutable = null, useFreeze = false) {
+            if(useImmutable === null && Immutable) useImmutable = true; //default to true if loaded
             function getEint(view) {
                 const b = getByte(view);
                 if(b < 0xfc) return b;
