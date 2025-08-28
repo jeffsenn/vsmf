@@ -227,7 +227,7 @@ module.exports = function() {
                     }
                     function serializeEform(buf, ef) {
                         (ef instanceof Immutable.Map ? Array.from(ef.entries()) :
-                         Object.entries(ef)).forEach(kv => { //todo: should this be sorted?
+                         Object.entries(ef)).sort().forEach(kv => {
                             const [key,val] = kv;
                             const bytes = textEncoder.encode(key);
                             buf.putEint(bytes.byteLength);
@@ -246,7 +246,7 @@ module.exports = function() {
                             buf.putInt(0xA3,1);
                             serializeUUID(buf, getI(a,'',1));
                             break;
-                        case "UFORM": 
+                        case "UFORM":  //deprecated
                         case "UForm": {
                             const lbuf = new ByteWriter();
                             serializeUUID(lbuf, getI(a,'',1));
@@ -255,20 +255,38 @@ module.exports = function() {
                             buf.putEint(lbuf.offset);
                             buf.putBytes(lbuf.toArrayBuffer());
                         } break;
-                        case "Binary": {
+                        case "Binary":
+                        case "Quantity":
+                        case "Message":
+                        case "Pad": {
                             const bytes = b64Tou8(getI(a,'',2))
-                            buf.putInt(0xaf,1);                                
+                            buf.putInt({"Binary":0xaf,
+                                        "Quantity":0xb2,
+                                        "Message":0xa7,
+                                        "Pad":0xaed}[spc],1);                                
+                            buf.putEint(bytes.byteLength);
+                            buf.putBytes(bytes);
+                        } break;
+                        case "Date": {
+                            const bytes = textEncoder.encode(getI(a,'',1));
+                            buf.putInt(0xbf,1); buf.putInt(1,1); buf.putInt(100,1);
                             buf.putEint(bytes.byteLength);
                             buf.putBytes(bytes);
                         } break;
                         case "MimeVal":
-                        case "MimeVal2":
-                        case "CHAR":
-                        case "QUANTITY":
-                        case "DATE":
-                        case "MESSAGE":
-                        case "STRUCT":
-                        case "HARRAY":
+                        case "MimeVal2": {
+                            const tbytes = textEncoder.encode(getI(a,'',1));
+                            const vbytes = textEncoder.encode(getI(a,'',2));
+                            buf.putInt(spc == "MimeVal" ? 0xb0 : 0xb4,1);
+                            buf.putEint(tbytes.byteLength);
+                            buf.putBytes(tbytes);                                                        
+                            if(spc == "MimeVal") buf.putEint(vbytes.byteLength);
+                            buf.putBytes(vbytes);                            
+                        } break;
+                        case "Char":
+                        case "Struct":
+                        case "HArray":
+                        case "Value":
                             todo();
                         default: {
                             //I guess attempt eform encode
@@ -293,7 +311,7 @@ module.exports = function() {
         NULL: null,
         ERRTOK: ERRTOK,
         isUForm: function(a) {
-            return isSpecial(a).upper() === "UFORM";
+            return isSpecial(a)?.upper() === "UFORM";
         },
         isEForm: function(a) {
             return Immutable.Map.isMap(a) && !isSpecial(a);
@@ -358,7 +376,6 @@ module.exports = function() {
                 const length = tclength == -1 ? getEint(view) : tclength;
                 if(view[1] + length > view[2]) throw(new Error("short buffer"));                
                 if(kind === 0) {
-                    //todo deal with ID not simple 1
                     switch (id) {
                         case TCID_HET_ARR: {
                             const result = [];
@@ -407,11 +424,15 @@ module.exports = function() {
                             return immute(ret, useImmutable, useFreeze);
                         }
                         case TCID_QUANTITY:
-                            return immute({"":["QUANTITY", getBytes(view, length)]}, useImmutable, useFreeze);
-                        case TCID_ISO8601:
-                            return immute({"":["DATE", textDecoder.decode(getBytes(view))]}, useImmutable, useFreeze);
+                            return immute({"":["Quantity", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
                         case TCID_MESSAGE:
-                            return immute({"":["MESSAGE", getBytes(view, length)]}, useImmutable, useFreeze);
+                            return immute({"":["Message", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
+                        case TCID_PAD:
+                            return immute({"":["Pad", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);  //todo: should this decode?
+                        case TCID_BIN:
+                            return immute({"":["Binary", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
+                        case TCID_ISO8601:
+                            return immute({"":["Date", textDecoder.decode(getBytes(view))]}, useImmutable, useFreeze);
                         case TCID_ERRTOK:
                             return ERRTOK;
                         case TCID_MSB_INT:
@@ -425,28 +446,27 @@ module.exports = function() {
                         case TCID_MSB_FLOAT:
                             if(length < 2) return length == 0 ? false : (getByte(view) != 0);
                             return unpackFloat(view, length, false);
-                        case TCID_PAD:
-                            return {"": ["PAD", u8ToB64(getBytes(view, length))]} //todo: should this decode?
-                        case TCID_BIN:
-                            return immute({"":["Binary", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
                         case TCID_MIME:
-                            return immute({"":["Mimeval", parseType(stringTC, view), parseType(binTC, view)]}, useImmutable, useFreeze);
+                            return immute({"":["Mimeval",
+                                               textDecoder.decode(getBytes(view, getEint(view))),                            
+                                               u8ToB64(getBytes(view, getEint(view)))]}, useImmutable, useFreeze);
                         case TCID_MIME2:
+                            const start = view[1];
                             return immute({"":["Mimeval2", 
-                                                      textDecoder.decode(getBytes(view, getEint(view))),
-                                                      u8ToB64(getBytes(view, getEint(view)))]}, useImmutable, useFreeze);
+                                               textDecoder.decode(getBytes(view, getEint(view))),
+                                               u8ToB64(getBytes(view, length-(view[1]-start)))]}, useImmutable, useFreeze);
                         case TCID_ASCII:
                         case TCID_LSB_CHAR: {
                             const val = unpackInt(view, length, true);
-                            return immute({"":["CHAR", val]}, useImmutable, useFreeze);
+                            return immute({"":["Char", val]}, useImmutable, useFreeze);
                         }
                         case TCID_MSB_CHAR: {
                             const val = unpackInt(view, length, false);
-                            return immute({"":["CHAR", val]}, useImmutable, useFreeze);
+                            return immute({"":["Char", val]}, useImmutable, useFreeze);
                         }
                         default:
-                            console.log("NYI", kind, length, id);
-                            return todo; //_var_or_fixed_tc(0xBF,len(cbuf), b'\x01\x81') + cbuf
+                            console.log("Warning: unimplemented value", tc); //todo?
+                            return immute({"":["Value", tc, u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
                     }
                 } else { //kind > 0
                     if(cid == TCID_STRUCT) {
@@ -454,7 +474,7 @@ module.exports = function() {
                         for(const i=0; i<tc.length; i++) {
                             ret.push(parseType(tc[i], view));
                         }
-                        return immute({"":["STRUCT", ret]}, useImmutable, useFreeze);
+                        return immute({"":["Struct", ret]}, useImmutable, useFreeze);
                     } else if(cid == TCID_HOMO_ARR) {
                         const subview = [view[0],view[1],view[1]+length];                        
                         if(tc.length != 2) throw(new Error("unsupported hom array"));
@@ -467,9 +487,9 @@ module.exports = function() {
                             ret.push(parseType(memType, subview));
                         }
                         view[1] += length;
-                        return immute({"":["HARRAY", ret]}, useImmutable, useFreeze); // not sure this is right
+                        return immute({"":["HArray", ret]}, useImmutable, useFreeze); // not sure this is right
                     } else {
-                        return immute({"":["VALUE", tc, u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze); //todo?
+                        return immute({"":["Value", tc, u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze); //todo?
                     }
                 }
             }
