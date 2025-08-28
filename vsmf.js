@@ -81,7 +81,7 @@ module.exports = function() {
     const stringTC = [[0,-1,TCID_STRING]];
     const binTC = [[0,-1,TCID_BIN]];
 
-    const ERRTOK = {"":["ERROR"]};
+    const ERRTOK = {"":["ErrTok"]};
     Object.freeze(ERRTOK);
     
     function bytesForFloat(n) {
@@ -239,14 +239,15 @@ module.exports = function() {
                     }
                     const spc = isSpecial(a);
                     switch(spc) {
-                        case "ERROR":
+                        case "ErrTok":
                             buf.putInt(0x13,1);
                             break;
                         case "UUID":
                             buf.putInt(0xA3,1);
                             serializeUUID(buf, getI(a,'',1));
                             break;
-                        case "UFORM": {
+                        case "UFORM": 
+                        case "UForm": {
                             const lbuf = new ByteWriter();
                             serializeUUID(lbuf, getI(a,'',1));
                             serializeEform(lbuf, getI(a,'',2));
@@ -254,14 +255,14 @@ module.exports = function() {
                             buf.putEint(lbuf.offset);
                             buf.putBytes(lbuf.toArrayBuffer());
                         } break;
-                        case "BINARY": {
+                        case "Binary": {
                             const bytes = b64Tou8(getI(a,'',2))
                             buf.putInt(0xaf,1);                                
                             buf.putEint(bytes.byteLength);
                             buf.putBytes(bytes);
                         } break;
-                        case "MIME":
-                        case "MIME2":
+                        case "MimeVal":
+                        case "MimeVal2":
                         case "CHAR":
                         case "QUANTITY":
                         case "DATE":
@@ -292,7 +293,7 @@ module.exports = function() {
         NULL: null,
         ERRTOK: ERRTOK,
         isUForm: function(a) {
-            return isSpecial(a) === "UFORM";
+            return isSpecial(a).upper() === "UFORM";
         },
         isEForm: function(a) {
             return Immutable.Map.isMap(a) && !isSpecial(a);
@@ -402,7 +403,7 @@ module.exports = function() {
                                 subview[1] += valLen;
                             }
                             view[1] += length;
-                            const ret= {"":["UFORM", uus, ufd]};
+                            const ret= {"":["UForm", uus, ufd]};
                             return immute(ret, useImmutable, useFreeze);
                         }
                         case TCID_QUANTITY:
@@ -427,11 +428,11 @@ module.exports = function() {
                         case TCID_PAD:
                             return {"": ["PAD", u8ToB64(getBytes(view, length))]} //todo: should this decode?
                         case TCID_BIN:
-                            return immute({"":["BINARY", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
+                            return immute({"":["Binary", u8ToB64(getBytes(view, length))]}, useImmutable, useFreeze);
                         case TCID_MIME:
-                            return immute({"":["MIME", parseType(stringTC, view), parseType(binTC, view)]}, useImmutable, useFreeze);
+                            return immute({"":["Mimeval", parseType(stringTC, view), parseType(binTC, view)]}, useImmutable, useFreeze);
                         case TCID_MIME2:
-                            return immute({"":["MIME2", 
+                            return immute({"":["Mimeval2", 
                                                       textDecoder.decode(getBytes(view, getEint(view))),
                                                       u8ToB64(getBytes(view, getEint(view)))]}, useImmutable, useFreeze);
                         case TCID_ASCII:
@@ -444,6 +445,7 @@ module.exports = function() {
                             return immute({"":["CHAR", val]}, useImmutable, useFreeze);
                         }
                         default:
+                            console.log("NYI", kind, length, id);
                             return todo; //_var_or_fixed_tc(0xBF,len(cbuf), b'\x01\x81') + cbuf
                     }
                 } else { //kind > 0

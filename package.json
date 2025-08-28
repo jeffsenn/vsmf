@@ -1,6 +1,6 @@
 {
   "name": "vsmf",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Visage Standard Message Format javascript/JSON API",
   "main": "vsmf.js",
   "scripts": {
