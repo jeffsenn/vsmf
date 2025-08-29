@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WebSocket Client</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    input, button, textarea { margin: 5px 0; width: 100%; }
+    textarea { height: 200px; }
+  </style>
+</head>
+<body>
+    <h2>Repos Proxy WebSocket Test Client</h2>
+
+    <label>Server URL (e.g. ws://localhost:9000):</label>
+    <input type="text" id="serverUrl" value="ws://localhost:9000"  placeholder="ws://localhost:9000">
+
+    <br>
+    <label>Remote Server HOST:PORT (e.g. foo.bar.com:6201):</label>
+    <input type="text" id="serverHost" value=""  placeholder="repl.foo.com:6210">
+    <br>
+    <button id="connectBtn">Connect</button>
+
+    <label>Message to send:</label>
+  <input type="text" id="messageInput"
+         value="[1,{&quot;&quot;:[&quot;UForm&quot;, &quot;~014f7589a6839f11f0a3c4d1b380be4e72&quot;, {&quot;client_type&quot;:[&quot;authenticated&quot;,1]}]}]"
+         placeholder="[1,{&quot;&quot;:[&quot;UForm&quot;, &quot;~014f7589a6839f11f0a3c4d1b380be4e72&quot;, {&quot;client_type&quot;:[&quot;authenticated&quot;,1]}]}]"         
+  >
+
+  <button id="sendBtn" disabled>Send Message</button>
+
+  <h3>Incoming Messages:</h3>
+  <textarea id="messages" readonly></textarea>
+
+  <script>
+   let socket;
+
+   const serverUrlInput = document.getElementById('serverUrl');
+   const serverHostInput = document.getElementById('serverHost');
+   const connectBtn = document.getElementById('connectBtn');
+   const messageInput = document.getElementById('messageInput');
+   const sendBtn = document.getElementById('sendBtn');
+   const messagesBox = document.getElementById('messages');
+
+   connectBtn.addEventListener('click', () => {
+       if (socket && socket.readyState === WebSocket.OPEN) {
+           socket.close();
+           connectBtn.textContent = 'Connect';
+           sendBtn.disabled = true;
+           log('Disconnected.');
+           return;
+       }
+
+       const url = serverUrlInput.value.trim();
+       if (!url) {
+           alert('Please enter a server URL.');
+           return;
+       }
+       const remote = serverHostInput.value.trim();
+       if (!remote) {
+           alert('Please enter a remote host.');
+           return;
+       }
+
+       socket = new WebSocket(url);
+
+       socket.addEventListener('open', () => {
+           log('Connected to ' + url);
+           connectBtn.textContent = 'Disconnect';
+           sendBtn.disabled = false;
+           //send remote connect
+           socket.send(remote);
+           log('Sent Connect: ' + msg);
+       });
+
+       socket.addEventListener('message', (event) => {
+           log('Received: ' + event.data);
+       });
+
+       socket.addEventListener('close', () => {
+           log('Connection closed.');
+           connectBtn.textContent = 'Connect';
+           sendBtn.disabled = true;
+       });
+
+       socket.addEventListener('error', (err) => {
+           log('Error: ' + err.message);
+       });
+   });
+
+   sendBtn.addEventListener('click', () => {
+       const msg = messageInput.value;
+       if (socket && socket.readyState === WebSocket.OPEN) {
+           socket.send(msg);
+           log('Sent: ' + msg);
+       } else {
+           alert('Not connected.');
+       }
+   });
+
+   function log(msg) {
+       messagesBox.value += msg + '\n';
+       messagesBox.scrollTop = messagesBox.scrollHeight;
+   }
+  </script>
+</body>
+</html>
