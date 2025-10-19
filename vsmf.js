@@ -176,7 +176,7 @@ module.exports = function() {
     }
     function isSpecial(a) {
         if(a.getIn && a.size == 1) return a.getIn(["",0]);
-        if(a[""] && Object.keys(a).length == 1)
+        if(a[""] && Object.keys(a).length == 1) // not super efficient for the edge case
             return a[""][0];
         return undefined;
     };
@@ -487,7 +487,7 @@ module.exports = function() {
                 } else { //kind > 0
                     if(cid == TCID_STRUCT) {
                         const ret = [];
-                        for(const i=0; i<tc.length; i++) {
+                        for(let i=0; i<tc.length; i++) {
                             ret.push(parseType(tc[i], view));
                         }
                         return immute({"":["Struct", ret]}, useImmutable, useFreeze);
